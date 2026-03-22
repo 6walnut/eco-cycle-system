@@ -1,6 +1,6 @@
 import io
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -302,6 +302,7 @@ def run_analysis(
     band_multiplier: float = 0.3,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    forecast_model: str = "hw",
 ) -> Dict[str, object]:
     df = df.copy()
     df = _parse_date_col(df)
@@ -344,8 +345,16 @@ def run_analysis(
     )
     states_df["state_cn"] = states_df["state"].map(STATE_CN_MAP)
 
-    # 5) Forecast future composite
-    forecast_series, _intervals = forecast_composite(composite, horizon_months=horizon_months)
+    # 5) Forecast future composite (Holt-Winters or LSTM)
+    forecast_meta: Dict[str, Any] = {}
+    if forecast_model == "lstm":
+        from lstm_forecast import forecast_composite_lstm
+
+        forecast_series, _intervals, forecast_meta = forecast_composite_lstm(
+            composite, horizon_months=horizon_months
+        )
+    else:
+        forecast_series, _intervals = forecast_composite(composite, horizon_months=horizon_months)
 
     # Classify future states by re-running the same heuristic on concatenated series.
     comp_all = pd.concat([composite, forecast_series])
@@ -354,22 +363,38 @@ def run_analysis(
     future_states["state_cn"] = future_states["state"].map(STATE_CN_MAP)
     future_states = future_states.rename(columns={"composite": "forecast_composite"})
 
-    # JSON-friendly serialization
+    # JSON-friendly serialization (NaN/Inf -> null so browsers can JSON.parse)
+    def _json_float(val: Any) -> Optional[float]:
+        try:
+            x = float(val)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(x):
+            return None
+        return x
+
     def _series_to_list(series: pd.Series, value_key: str) -> List[Dict[str, object]]:
         s = series.copy()
         s = s.sort_index()
-        return [{"date": str(idx.date()), value_key: float(val)} for idx, val in zip(s.index, s.values)]
+        rows = []
+        for idx, val in zip(s.index, s.values):
+            jf = _json_float(val)
+            row: Dict[str, object] = {"date": str(idx.date()), value_key: jf}
+            rows.append(row)
+        return rows
 
     out = {
         "indicator_columns": indicator_cols,
         "fusion_config": config.__dict__,
         "clip_quantiles": list(clip_quantiles),
-        "weights": weights,
+        "forecast_model": forecast_model,
+        "forecast_meta": forecast_meta if forecast_meta else None,
+        "weights": {k: float(v) for k, v in weights.items()},
         "composite_history": _series_to_list(composite, "composite"),
         "states_history": [
             {
                 "date": str(row["date"].date()),
-                "composite": float(row["composite"]),
+                "composite": _json_float(row["composite"]),
                 "state": row["state"],
                 "state_cn": row["state_cn"],
             }
@@ -379,7 +404,7 @@ def run_analysis(
         "future_states": [
             {
                 "date": str(row["date"].date()),
-                "forecast_composite": float(row["forecast_composite"]),
+                "forecast_composite": _json_float(row["forecast_composite"]),
                 "state": row["state"],
                 "state_cn": row["state_cn"],
             }

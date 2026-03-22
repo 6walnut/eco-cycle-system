@@ -1,0 +1,3 @@
+# Optional: LSTM 预测（安装较慢，按需执行）
+# pip install -r requirements-ml.txt
+tensorflow>=2.15.0
