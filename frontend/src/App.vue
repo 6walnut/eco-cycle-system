@@ -163,7 +163,9 @@ function renderChart() {
   const histData = hist.map((x) => [x.date, x.composite]);
   const fcData = fc.map((x) => [x.date, x.forecast_composite]);
 
-  if (!chart) chart = echarts.init(chartEl.value);
+  // v-if="result" 会销毁 DOM；第二次运行必须 dispose 后重新 init，否则会绑在已删除的节点上
+  chart?.dispose();
+  chart = echarts.init(chartEl.value);
   chart.setOption({
     tooltip: { trigger: "axis" },
     legend: { data: ["历史综合指数", "预测"] },
@@ -183,7 +185,12 @@ function renderChart() {
   });
 }
 
-watch(result, async () => {
+watch(result, async (val) => {
+  if (!val) {
+    chart?.dispose();
+    chart = null;
+    return;
+  }
   await nextTick();
   renderChart();
 });
