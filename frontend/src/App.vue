@@ -118,9 +118,27 @@
         <div ref="chartEl" class="chart"></div>
       </section>
 
+      <div v-if="result" class="grid-2">
+        <section class="card card-chart">
+          <div class="card-head">
+            <span class="step">05</span>
+            <h2>权重柱状图</h2>
+          </div>
+          <div ref="weightChartEl" class="chart chart-small"></div>
+        </section>
+
+        <section class="card card-chart">
+          <div class="card-head">
+            <span class="step">06</span>
+            <h2>历史阶段分布</h2>
+          </div>
+          <div ref="stateChartEl" class="chart chart-small"></div>
+        </section>
+      </div>
+
       <section v-if="result?.future_states?.length" class="card">
         <div class="card-head">
-          <span class="step">05</span>
+          <span class="step">07</span>
           <h2>未来阶段预测</h2>
         </div>
         <div class="table-wrap">
@@ -143,6 +161,31 @@
         </div>
       </section>
 
+      <section v-if="historyStateRows.length" class="card">
+        <div class="card-head">
+          <span class="step">08</span>
+          <h2>历史数据表（最近 24 期）</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>综合指数</th>
+                <th>阶段</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in historyStateRows" :key="r.date">
+                <td>{{ r.date }}</td>
+                <td class="num">{{ r.composite?.toFixed?.(4) ?? r.composite }}</td>
+                <td><span class="tag">{{ r.state_cn || r.state || "-" }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <footer class="footer">
         <span>Eco Cycle System · 毕业设计原型</span>
       </footer>
@@ -151,7 +194,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted, watch, nextTick } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import axios from "axios";
 import * as echarts from "echarts";
 
@@ -161,7 +204,11 @@ const loadingOnline = ref(false);
 const error = ref("");
 const result = ref(null);
 const chartEl = ref(null);
+const weightChartEl = ref(null);
+const stateChartEl = ref(null);
 let chart = null;
+let weightChart = null;
+let stateChart = null;
 
 const fileName = computed(() => file.value?.name ?? "");
 
@@ -185,6 +232,34 @@ const INDICATOR_LABELS = {
 function labelZh(key) {
   return INDICATOR_LABELS[key] ?? key;
 }
+
+const weightRows = computed(() => {
+  const ws = result.value?.weights || {};
+  return Object.entries(ws)
+    .map(([key, value]) => ({
+      key,
+      name: labelZh(key),
+      value: Number(value ?? 0),
+    }))
+    .sort((a, b) => b.value - a.value);
+});
+
+const historyStateRows = computed(() => {
+  const hist = result.value?.composite_history || [];
+  const states = result.value?.states_history || [];
+  const stateMap = new Map(states.map((s) => [s.date, s]));
+  return hist
+    .map((h) => {
+      const s = stateMap.get(h.date) || {};
+      return {
+        date: h.date,
+        composite: h.composite,
+        state: s.state,
+        state_cn: s.state_cn,
+      };
+    })
+    .slice(-24);
+});
 
 const form = ref({
   forecast_model: "hw",
@@ -337,18 +412,126 @@ function renderChart() {
   });
 }
 
+function renderWeightChart() {
+  if (!weightChartEl.value || !result.value) return;
+  const rows = weightRows.value;
+  if (!rows.length) return;
+  weightChart?.dispose();
+  weightChart = echarts.init(weightChartEl.value, null, { renderer: "canvas" });
+  weightChart.setOption({
+    grid: { left: 56, right: 20, top: 24, bottom: 48 },
+    tooltip: { trigger: "axis" },
+    xAxis: {
+      type: "category",
+      data: rows.map((r) => r.name),
+      axisLabel: { color: "#64748b", interval: 0, rotate: 20 },
+      axisLine: { lineStyle: { color: "#cbd5e1" } },
+    },
+    yAxis: {
+      type: "value",
+      axisLabel: { color: "#64748b" },
+      splitLine: { lineStyle: { color: "#e2e8f0", type: "dashed" } },
+    },
+    series: [
+      {
+        type: "bar",
+        data: rows.map((r) => Number(r.value.toFixed(6))),
+        barMaxWidth: 42,
+        itemStyle: {
+          borderRadius: [8, 8, 0, 0],
+          color: {
+            type: "linear",
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: "#C3E5AE" },
+              { offset: 1, color: "#97DBAE" },
+            ],
+          },
+        },
+      },
+    ],
+  });
+}
+
+function renderStateChart() {
+  if (!stateChartEl.value || !result.value) return;
+  const rows = result.value?.states_history || [];
+  if (!rows.length) return;
+  const counts = {};
+  for (const r of rows) {
+    const name = r.state_cn || r.state || "未知";
+    counts[name] = (counts[name] || 0) + 1;
+  }
+  const pieData = Object.entries(counts).map(([name, value]) => ({ name, value }));
+  stateChart?.dispose();
+  stateChart = echarts.init(stateChartEl.value, null, { renderer: "canvas" });
+  stateChart.setOption({
+    color: ["#0f766e", "#34d399", "#f59e0b", "#f97316", "#6ee7b7", "#fdba74"],
+    tooltip: { trigger: "item" },
+    legend: {
+      bottom: 0,
+      textStyle: { color: "#64748b" },
+    },
+    series: [
+      {
+        type: "pie",
+        radius: ["45%", "70%"],
+        center: ["50%", "45%"],
+        itemStyle: { borderColor: "#fff", borderWidth: 2 },
+        label: { formatter: "{b}\n{d}%", color: "#334155" },
+        emphasis: {
+          scale: true,
+          scaleSize: 8,
+          itemStyle: {
+            shadowBlur: 14,
+            shadowOffsetY: 4,
+            shadowColor: "rgba(15, 23, 42, 0.18)",
+          },
+        },
+        data: pieData,
+      },
+    ],
+  });
+}
+
+function renderAllCharts() {
+  renderChart();
+  renderWeightChart();
+  renderStateChart();
+}
+
+function handleResize() {
+  chart?.resize();
+  weightChart?.resize();
+  stateChart?.resize();
+}
+
 watch(result, async (val) => {
   if (!val) {
     chart?.dispose();
     chart = null;
+    weightChart?.dispose();
+    weightChart = null;
+    stateChart?.dispose();
+    stateChart = null;
     return;
   }
   await nextTick();
-  renderChart();
+  renderAllCharts();
+});
+
+onMounted(() => {
+  window.addEventListener("resize", handleResize);
 });
 
 onUnmounted(() => {
   chart?.dispose();
+  weightChart?.dispose();
+  stateChart?.dispose();
+  window.removeEventListener("resize", handleResize);
 });
 </script>
 
@@ -707,6 +890,10 @@ onUnmounted(() => {
 .chart {
   width: 100%;
   height: 400px;
+}
+
+.chart-small {
+  height: 320px;
 }
 
 .table-wrap {
