@@ -28,12 +28,19 @@
               <span v-if="loading" class="spinner" />
               {{ loading ? "分析中…" : "运行分析" }}
             </button>
+            <button type="button" class="btn btn-primary ghost" :disabled="loading" @click="analyzeSinaOnline">
+              <span v-if="loadingOnline" class="spinner" />
+              {{ loadingOnline ? "抓取中…" : "一键抓取新浪并分析" }}
+            </button>
             <button type="button" class="btn btn-secondary" :disabled="!file || loading" @click="saveDataset">
               保存到数据库
             </button>
           </div>
         </div>
         <p v-if="error" class="alert alert-error">{{ error }}</p>
+        <p v-if="result?.dataset_id" class="meta-note">
+          本次已自动写入数据库：dataset_id={{ result.dataset_id }}，run_id={{ result.run_id }}
+        </p>
       </section>
 
       <div class="grid-2">
@@ -150,6 +157,7 @@ import * as echarts from "echarts";
 
 const file = ref(null);
 const loading = ref(false);
+const loadingOnline = ref(false);
 const error = ref("");
 const result = ref(null);
 const chartEl = ref(null);
@@ -233,6 +241,27 @@ async function saveDataset() {
     error.value = e.response?.data?.error || e.message;
   } finally {
     loading.value = false;
+  }
+}
+
+async function analyzeSinaOnline() {
+  loadingOnline.value = true;
+  error.value = "";
+  result.value = null;
+  const fd = new FormData();
+  fd.append("forecast_model", form.value.forecast_model);
+  fd.append("fusion_method", form.value.fusion_method);
+  fd.append("standardize", form.value.standardize);
+  fd.append("transform_type", form.value.transform_type);
+  fd.append("horizon_months", String(form.value.horizon_months));
+  if (form.value.inverse_columns) fd.append("inverse_columns", form.value.inverse_columns);
+  try {
+    const { data } = await axios.post("/api/analyze/sina", fd, { timeout: 120000 });
+    result.value = data;
+  } catch (e) {
+    error.value = e.response?.data?.error || e.message || String(e);
+  } finally {
+    loadingOnline.value = false;
   }
 }
 
@@ -525,6 +554,11 @@ onUnmounted(() => {
   color: #475569;
   background: #f1f5f9;
   border: 1px solid #e2e8f0;
+}
+
+.btn-primary.ghost {
+  background: linear-gradient(135deg, #0ea5e9, #2563eb);
+  box-shadow: 0 4px 14px rgba(14, 165, 233, 0.35);
 }
 
 .spinner {

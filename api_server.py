@@ -8,6 +8,7 @@ from flask_cors import CORS
 
 from core import FusionConfig, _parse_date_col, create_sample_data, load_user_csv, run_analysis
 from db_models import get_analysis_run, init_db, list_datasets, load_dataset_rows, save_analysis_run, save_dataset
+from sina_macro_fetch import fetch_sina_macro_dataset_with_meta
 
 
 def _parse_inverse_columns(raw: Optional[str], all_indicators: List[str]) -> List[str]:
@@ -70,6 +71,20 @@ def _run_analyze_df(df: pd.DataFrame, params: dict, inverse_columns: List[str]):
     )
 
 
+def _rows_for_storage(df: pd.DataFrame) -> List[dict]:
+    x = _parse_date_col(df.copy())
+    x["date"] = pd.to_datetime(x["date"]).dt.strftime("%Y-%m-%d")
+    x = x.replace({np.nan: None, pd.NA: None})
+    return x.to_dict(orient="records")
+
+
+def _persist_run(df: pd.DataFrame, params: dict, result: dict, dataset_name: str = "upload") -> tuple[int, int]:
+    rows = _rows_for_storage(df)
+    ds_id = save_dataset(rows, name=dataset_name)
+    run_id = save_analysis_run(ds_id, params, result, forecast_model=params["forecast_model"])
+    return ds_id, run_id
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -106,6 +121,58 @@ def create_app() -> Flask:
         except Exception as e:
             return jsonify({"error": str(e)}), 400
 
+        # Auto-persist every analysis run
+        try:
+            dataset_name = uploaded.filename if (uploaded is not None and uploaded.filename) else "sample"
+            ds_id, run_id = _persist_run(df, params, result, dataset_name=dataset_name)
+            result["dataset_id"] = ds_id
+            result["run_id"] = run_id
+        except Exception as e:
+            return jsonify({"error": f"analysis succeeded but DB save failed: {e}"}), 500
+
+        return jsonify(result)
+
+    @app.post("/api/analyze/sina")
+    def analyze_sina():
+        """
+        Auto-fetch macro data from online source and run analysis directly.
+        No file upload required.
+        """
+        params = _analyze_params_from_form()
+        try:
+            df, fetch_meta = fetch_sina_macro_dataset_with_meta()
+        except Exception as e:
+            return jsonify({"error": f"failed to fetch Sina macro data: {e}"}), 400
+
+        indicator_cols = [c for c in df.columns if c != "date"]
+        inverse_columns = _parse_inverse_columns(request.form.get("inverse_columns"), indicator_cols)
+        try:
+            result = _run_analyze_df(df, params, inverse_columns)
+        except Exception as e:
+            # Fallback: if date filter removes all rows, retry once without date range.
+            if "No data after applying date range filter." in str(e) and (params.get("start_date") or params.get("end_date")):
+                retry_params = dict(params)
+                retry_params["start_date"] = None
+                retry_params["end_date"] = None
+                try:
+                    result = _run_analyze_df(df, retry_params, inverse_columns)
+                    result["warnings"] = [
+                        "date range removed all fetched rows; reran automatically without start_date/end_date"
+                    ]
+                    result["effective_params"] = retry_params
+                except Exception as retry_e:
+                    return jsonify({"error": str(retry_e), "fetch_meta": fetch_meta}), 400
+            else:
+                return jsonify({"error": str(e), "fetch_meta": fetch_meta}), 400
+
+        try:
+            ds_id, run_id = _persist_run(df, params, result, dataset_name="sina_auto")
+            result["dataset_id"] = ds_id
+            result["run_id"] = run_id
+            result["source"] = "sina_online"
+            result["fetch_meta"] = fetch_meta
+        except Exception as e:
+            return jsonify({"error": f"analysis succeeded but DB save failed: {e}"}), 500
         return jsonify(result)
 
     @app.post("/api/datasets")
@@ -118,9 +185,7 @@ def create_app() -> Flask:
         raw = f.read()
         df = pd.read_csv(io.BytesIO(raw))
         df = _parse_date_col(df)
-        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-        df = df.replace({np.nan: None, pd.NA: None})
-        rows = df.to_dict(orient="records")
+        rows = _rows_for_storage(df)
         ds_id = save_dataset(rows, name=name)
         return jsonify({"id": ds_id, "name": name, "rows": len(rows)})
 

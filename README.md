@@ -26,7 +26,8 @@ python api_server.py
 
 - `GET /api/health`
 - `GET /api/sample`
-- `POST /api/analyze` — 上传 CSV 分析（表单字段见下）
+- `POST /api/analyze` — 上传 CSV 分析（并**自动写入数据库**）
+- `POST /api/analyze/sina` — 直接在线抓取宏观数据并分析（并自动写库）
 - `POST /api/datasets` — 上传 CSV **保存到数据库**
 - `GET /api/datasets` — 数据集列表
 - `GET /api/datasets/<id>` — 预览数据
@@ -46,7 +47,7 @@ python api_server.py
 | `fusion_method` | `equal` / `pca` / `entropy` |
 | `horizon_months` | 预测月数 3–12 |
 
-返回 JSON 含：`weights`、`composite_history`、`states_history`、`forecast`、`future_states`、`forecast_model`、`forecast_meta`。
+返回 JSON 含：`weights`、`composite_history`、`states_history`、`forecast`、`future_states`、`forecast_model`、`forecast_meta`，并附带 `dataset_id`、`run_id`（自动落库后返回）。
 
 ## MySQL（可选）
 
