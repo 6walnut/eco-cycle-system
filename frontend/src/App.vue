@@ -277,14 +277,14 @@ const fileName = computed(() => file.value?.name ?? "");
 
 /** 英文列名 -> 中文展示（与 Wind/CSV 常用列一致） */
 const INDICATOR_LABELS = {
-  cpi_yoy: "CPI（当月同比）",
+  cpi_yoy: "CPI",
   pmi: "制造业PMI",
-  m2_yoy: "M2（同比）",
-  m1_yoy: "M1（同比）",
-  ind_growth_yoy: "工业增加值（同比）",
-  fai_acc_yoy: "固定资产投资（累计同比）",
-  social_finance_yoy: "社会融资规模存量（同比）",
-  gdp: "GDP（代理）",
+  m2_yoy: "M2",
+  m1_yoy: "M1",
+  ind_growth_yoy: "工业增加值",
+  fai_acc_yoy: "固定资产投资",
+  social_finance_yoy: "社会融资规模存量",
+  gdp: "GDP",
   industrial_production: "工业增加值",
   cpi: "CPI",
   m2: "M2",
@@ -293,8 +293,16 @@ const INDICATOR_LABELS = {
   fx: "汇率",
 };
 
+/** 去掉中英文括号及括号内说明，用于热力图等轴标签 */
+function stripParenLabel(text) {
+  return String(text)
+    .replace(/[（(][^）)]*[）)]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function labelZh(key) {
-  return INDICATOR_LABELS[key] ?? key;
+  return stripParenLabel(INDICATOR_LABELS[key] ?? key);
 }
 
 const historyStateRows = computed(() => {
@@ -693,7 +701,7 @@ function renderPhaseChart() {
     })
     .filter(Boolean);
   if (!heatData.length) return;
-  const labels = cols.map((c) => labelZh(c));
+  const labels = cols.map((c) => stripParenLabel(labelZh(c)));
 
   compareChart?.dispose();
   compareChart = echarts.init(compareChartEl.value, null, { renderer: "canvas" });
@@ -728,7 +736,7 @@ function renderPhaseChart() {
       calculable: true,
       orient: "horizontal",
       left: "center",
-      bottom: 18,
+      bottom: -3,
       text: ["高相关", "低相关"],
       textStyle: { color: "#64748b" },
       inRange: {
