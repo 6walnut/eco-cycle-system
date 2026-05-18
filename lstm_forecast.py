@@ -42,7 +42,7 @@ def forecast_composite_lstm(
     if len(y) < min_train or not _try_import_tf():
         meta["model"] = "hw_fallback"
         meta["note"] = (
-            "TensorFlow not installed or series too short; use Holt-Winters instead."
+            "未安装 TensorFlow 或样本序列长度不足，已自动改用 Holt-Winters 预测。"
             if not _try_import_tf()
             else f"Need at least {min_train} points for LSTM; got {len(y)}."
         )

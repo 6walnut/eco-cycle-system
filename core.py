@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
+from statsmodels.tsa.statespace.dynamic_factor import DynamicFactor
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 
@@ -14,7 +15,7 @@ class FusionConfig:
     transform_type: str
     # zscore/minmax
     standardize: str
-    # equal/pca/entropy
+    # equal/pca/entropy/dfm
     fusion_method: str
     inverse_columns: List[str]
     smoothing_window: int
@@ -119,6 +120,64 @@ def compute_entropy_weights(X_minmax: np.ndarray, eps: float = 1e-12) -> np.ndar
     return w
 
 
+def _fuse_with_dfm(X_std: pd.DataFrame) -> Tuple[pd.Series, Dict[str, float]]:
+    """
+    Dynamic Factor Model fusion.
+
+    - Fit one latent factor with AR(1) dynamics on standardized indicators.
+    - Use abs(corr(indicator, factor)) as interpretable indicator weights.
+    - Return the latent factor (sign-aligned to weighted average indicators).
+    """
+    if X_std.shape[1] < 2:
+        raise ValueError("DFM needs at least 2 indicators.")
+    if X_std.shape[0] < 24:
+        raise ValueError("DFM needs at least 24 monthly observations for stable estimation.")
+
+    try:
+        model = DynamicFactor(endog=X_std, k_factors=1, factor_order=1, error_order=0)
+        fit = model.fit(disp=False, maxiter=300)
+    except Exception as e:
+        raise ValueError(f"DFM fitting failed: {e}") from e
+
+    # Prefer smoothed latent factor; fallback to filtered if needed.
+    factor_arr = np.asarray(fit.factors.smoothed)[0]
+    if factor_arr.shape[0] != len(X_std):
+        factor_arr = np.asarray(fit.factors.filtered)[0]
+    factor = pd.Series(factor_arr, index=X_std.index, dtype=float, name="dfm_factor")
+
+    # Z-score factor for scale comparability with other fusion outputs.
+    f_std = factor.std(ddof=0)
+    if pd.isna(f_std) or f_std == 0:
+        comp = factor - factor.mean()
+    else:
+        comp = (factor - factor.mean()) / f_std
+
+    corrs = []
+    for c in X_std.columns:
+        xv = X_std[c].values.astype(float)
+        fv = comp.values.astype(float)
+        if np.std(xv) == 0 or np.std(fv) == 0:
+            corrs.append(0.0)
+            continue
+        corr = float(np.corrcoef(xv, fv)[0, 1])
+        if not np.isfinite(corr):
+            corr = 0.0
+        corrs.append(corr)
+    abs_corr = np.abs(np.asarray(corrs, dtype=float))
+    if abs_corr.sum() == 0:
+        w = np.ones_like(abs_corr) / len(abs_corr)
+    else:
+        w = abs_corr / abs_corr.sum()
+
+    # Align factor direction so larger composite keeps "better" semantics.
+    weighted_avg = np.dot(X_std.values, w)
+    if np.corrcoef(weighted_avg, comp.values)[0, 1] < 0:
+        comp = -comp
+
+    weights = {c: float(w[i]) for i, c in enumerate(X_std.columns)}
+    return comp, weights
+
+
 def fuse_indicators(X: pd.DataFrame, config: FusionConfig) -> Tuple[pd.Series, Dict[str, float]]:
     inv = set([c for c in config.inverse_columns])
     X_use = X.copy()
@@ -157,7 +216,10 @@ def fuse_indicators(X: pd.DataFrame, config: FusionConfig) -> Tuple[pd.Series, D
         comp = np.dot(X_pos.values, w_vec)
         return pd.Series(comp, index=X_pos.index), weights
 
-    raise ValueError("fusion_method must be equal/pca/entropy")
+    if config.fusion_method == "dfm":
+        return _fuse_with_dfm(X_std)
+
+    raise ValueError("fusion_method must be equal/pca/entropy/dfm")
 
 
 def smooth_series(s: pd.Series, window: int) -> pd.Series:
@@ -338,6 +400,8 @@ def run_analysis(
     # 3) Fusion
     composite_raw, weights = fuse_indicators(df_tx[indicator_cols], config=config)
     composite = smooth_series(composite_raw, config.smoothing_window)
+    corr = df_tx[indicator_cols].corr(method="pearson")
+    corr = corr.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     # 4) States on historical composite
     states_df = classify_cycle_states(composite, ma_window=ma_window, band_multiplier=band_multiplier).sort_values(
@@ -385,6 +449,15 @@ def run_analysis(
 
     out = {
         "indicator_columns": indicator_cols,
+        "indicator_corr": [
+            {
+                "row": str(r),
+                "col": str(c),
+                "value": _json_float(corr.loc[r, c]),
+            }
+            for r in indicator_cols
+            for c in indicator_cols
+        ],
         "fusion_config": config.__dict__,
         "clip_quantiles": list(clip_quantiles),
         "forecast_model": forecast_model,

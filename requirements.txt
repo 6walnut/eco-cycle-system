@@ -10,3 +10,4 @@ flask-cors>=4.0
 SQLAlchemy>=2.0
 pymysql>=1.1.0
 akshare>=1.13.0
+reportlab>=4.2.0

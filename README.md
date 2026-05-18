@@ -5,10 +5,11 @@
 ## 功能概览
 
 1. **数据预处理**：CSV（`date` + 指标列）、缺失插值、分位数截断、可选 `mom`/`yoy`
-2. **融合**：`zscore` / `minmax` + `equal` / `pca` / `entropy`
+2. **融合**：`zscore` / `minmax` + `equal` / `pca` / `entropy` / `dfm`（动态因子模型）
 3. **周期阶段**：基于综合指数与移动平均的启发式四阶段
 4. **预测**：`Holt-Winters`（默认）或 **LSTM**（需安装 TensorFlow，见 `requirements-ml.txt`）
 5. **数据库**：默认 SQLite（`data/eco_cycle.db`），可切换 MySQL
+6. **账号与管理**：用户登录、我的数据/任务/收藏、分析对比、分享链接、下载与 PDF 导出、管理员配置
 
 ## 环境
 
@@ -33,6 +34,14 @@ python api_server.py
 - `GET /api/datasets/<id>` — 预览数据
 - `POST /api/datasets/<id>/analyze` — 对已存数据集分析并写入 `analysis_runs`
 - `GET /api/runs/<id>` — 查询某次分析结果
+- `POST /api/auth/register` / `POST /api/auth/login` / `GET /api/me`
+- `GET /api/me/datasets` / `GET /api/me/runs` / `GET /api/me/favorites`
+- `POST /api/favorites/<run_id>` / `DELETE /api/favorites/<run_id>`
+- `GET /api/runs/compare?run_id_a=...&run_id_b=...`
+- `POST /api/runs/<id>/share` / `GET /api/share/<token>`
+- `GET /api/runs/<id>/download.json` / `GET /api/runs/<id>/export/pdf`
+- `GET /api/datasets/<id>/download.csv`
+- `GET /api/admin/*` / `POST /api/admin/*` / `DELETE /api/admin/*`（管理员）
 
 ### `POST /api/analyze` 表单字段
 
@@ -44,7 +53,7 @@ python api_server.py
 | `inverse_columns` | 逗号分隔需要反向的列名 |
 | `transform_type` | `none` / `mom` / `yoy` |
 | `standardize` | `zscore` / `minmax` |
-| `fusion_method` | `equal` / `pca` / `entropy` |
+| `fusion_method` | `equal` / `pca` / `entropy` / `dfm` |
 | `horizon_months` | 预测月数 3–12 |
 
 返回 JSON 含：`weights`、`composite_history`、`states_history`、`forecast`、`future_states`、`forecast_model`、`forecast_meta`，并附带 `dataset_id`、`run_id`（自动落库后返回）。
@@ -57,6 +66,13 @@ python api_server.py
 ```
 
 需先建空库；表结构由 SQLAlchemy 自动创建。
+
+### 默认管理员
+
+- 用户名：`admin`
+- 密码：`admin123`
+
+建议首次登录后手动修改为强密码。
 
 ## 前端（Vue3 + Vite + ECharts）
 

@@ -9,6 +9,10 @@
         <p class="hero-desc">
           上传月度 <code>CSV</code>（首列为 <code>date</code>），进行多指标融合、周期阶段识别与短期预测
         </p>
+        <div class="btn-group" style="justify-content:center; margin-top: 12px">
+          <button class="btn btn-secondary" @click="goHome">返回个人主页</button>
+          <button class="btn btn-secondary" @click="logoutAndBack">退出登录</button>
+        </div>
       </header>
 
       <section class="card card-upload">
@@ -41,6 +45,7 @@
         <p v-if="result?.dataset_id" class="meta-note">
           本次已自动写入数据库：dataset_id={{ result.dataset_id }}，run_id={{ result.run_id }}
         </p>
+        <p v-if="activeRunId" class="meta-note">当前查看的是历史分析 run_id={{ activeRunId }}</p>
       </section>
 
       <div class="grid-2">
@@ -61,6 +66,7 @@
               <label>融合方式</label>
               <select v-model="form.fusion_method" class="input">
                 <option value="pca">PCA</option>
+                <option value="dfm">动态因子模型（DFM）</option>
                 <option value="entropy">熵权</option>
                 <option value="equal">等权</option>
               </select>
@@ -115,6 +121,10 @@
           <h2>综合指数与预测</h2>
         </div>
         <p v-if="result.forecast_meta?.note" class="meta-note">{{ result.forecast_meta.note }}</p>
+        <label class="switch-row">
+          <input v-model="showConfidenceBand" type="checkbox" />
+          <span>显示预测置信区间（近似）</span>
+        </label>
         <div ref="chartEl" class="chart"></div>
       </section>
 
@@ -122,9 +132,9 @@
         <section class="card card-chart">
           <div class="card-head">
             <span class="step">05</span>
-            <h2>权重柱状图</h2>
+            <h2>指标相关性热力图</h2>
           </div>
-          <div ref="weightChartEl" class="chart chart-small"></div>
+          <div ref="compareChartEl" class="chart chart-small"></div>
         </section>
 
         <section class="card card-chart">
@@ -155,6 +165,47 @@
                 <td>{{ r.date }}</td>
                 <td class="num">{{ r.forecast_composite?.toFixed?.(4) ?? r.forecast_composite }}</td>
                 <td><span class="tag">{{ r.state_cn || r.state }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="btn-group" v-if="result?.run_id && meUser" style="margin-top: 12px">
+          <button class="btn btn-secondary" @click="shareCurrentRun">生成分享链接</button>
+          <button class="btn btn-secondary" @click="exportCurrentRunPdf">导出本次 PDF</button>
+        </div>
+        <p v-if="shareUrl" class="meta-note">分享链接：{{ shareUrl }}</p>
+      </section>
+
+      <section class="card" v-if="meUser">
+        <div class="card-head">
+          <span class="step">09</span>
+          <h2>分析对比（两次运行）</h2>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label>run_id_a</label>
+            <input v-model.number="compareForm.runA" class="input" type="number" min="1" />
+          </div>
+          <div class="field">
+            <label>run_id_b</label>
+            <input v-model.number="compareForm.runB" class="input" type="number" min="1" />
+          </div>
+        </div>
+        <div class="btn-group" style="margin-top: 8px">
+          <button class="btn btn-primary" @click="compareRuns">对比两次分析</button>
+        </div>
+        <div class="table-wrap" v-if="compareRows.length" style="margin-top: 12px">
+          <table>
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>权重变化（B-A）</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in compareRows" :key="r.key">
+                <td>{{ labelZh(r.key) }}</td>
+                <td class="num">{{ r.delta.toFixed(6) }}</td>
               </tr>
             </tbody>
           </table>
@@ -197,18 +248,30 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import axios from "axios";
 import * as echarts from "echarts";
+import { useRoute, useRouter } from "vue-router";
 
+const router = useRouter();
+const route = useRoute();
 const file = ref(null);
 const loading = ref(false);
 const loadingOnline = ref(false);
 const error = ref("");
 const result = ref(null);
+const shareUrl = ref("");
 const chartEl = ref(null);
-const weightChartEl = ref(null);
+const compareChartEl = ref(null);
 const stateChartEl = ref(null);
 let chart = null;
-let weightChart = null;
+let compareChart = null;
 let stateChart = null;
+const showConfidenceBand = ref(false);
+const authToken = ref(localStorage.getItem("eco_token") || "");
+const meUser = ref(null);
+const myRuns = ref([]);
+const myDatasets = ref([]);
+const compareForm = ref({ runA: null, runB: null });
+const compareResult = ref(null);
+const activeRunId = ref(null);
 
 const fileName = computed(() => file.value?.name ?? "");
 
@@ -217,6 +280,7 @@ const INDICATOR_LABELS = {
   cpi_yoy: "CPI（当月同比）",
   pmi: "制造业PMI",
   m2_yoy: "M2（同比）",
+  m1_yoy: "M1（同比）",
   ind_growth_yoy: "工业增加值（同比）",
   fai_acc_yoy: "固定资产投资（累计同比）",
   social_finance_yoy: "社会融资规模存量（同比）",
@@ -232,17 +296,6 @@ const INDICATOR_LABELS = {
 function labelZh(key) {
   return INDICATOR_LABELS[key] ?? key;
 }
-
-const weightRows = computed(() => {
-  const ws = result.value?.weights || {};
-  return Object.entries(ws)
-    .map(([key, value]) => ({
-      key,
-      name: labelZh(key),
-      value: Number(value ?? 0),
-    }))
-    .sort((a, b) => b.value - a.value);
-});
 
 const historyStateRows = computed(() => {
   const hist = result.value?.composite_history || [];
@@ -261,6 +314,13 @@ const historyStateRows = computed(() => {
     .slice(-24);
 });
 
+const compareRows = computed(() => {
+  const d = compareResult.value?.weight_delta || {};
+  return Object.entries(d)
+    .map(([key, delta]) => ({ key, delta: Number(delta || 0) }))
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+});
+
 const form = ref({
   forecast_model: "hw",
   fusion_method: "pca",
@@ -274,6 +334,45 @@ function onFile(e) {
   const f = e.target.files?.[0];
   file.value = f || null;
   error.value = "";
+}
+
+function authConfig(extra = {}) {
+  const headers = authToken.value ? { Authorization: `Bearer ${authToken.value}` } : {};
+  return { ...extra, headers: { ...(extra.headers || {}), ...headers } };
+}
+
+async function loadMyWorkspace() {
+  if (!authToken.value) return;
+  try {
+    const [me, runs, datasets] = await Promise.all([
+      axios.get("/api/me", authConfig()),
+      axios.get("/api/me/runs", authConfig()),
+      axios.get("/api/me/datasets", authConfig()),
+    ]);
+    meUser.value = me.data;
+    myRuns.value = runs.data || [];
+    myDatasets.value = datasets.data || [];
+  } catch (_e) {
+    logout();
+  }
+}
+
+function logout() {
+  authToken.value = "";
+  localStorage.removeItem("eco_token");
+  localStorage.removeItem("eco_user");
+  meUser.value = null;
+  myRuns.value = [];
+  myDatasets.value = [];
+}
+
+function goHome() {
+  router.push("/home");
+}
+
+function logoutAndBack() {
+  logout();
+  router.push("/login");
 }
 
 async function analyze() {
@@ -291,10 +390,9 @@ async function analyze() {
   fd.append("horizon_months", String(form.value.horizon_months));
   if (form.value.inverse_columns) fd.append("inverse_columns", form.value.inverse_columns);
   try {
-    const { data } = await axios.post("/api/analyze", fd, {
-      timeout: 120000,
-    });
+    const { data } = await axios.post("/api/analyze", fd, authConfig({ timeout: 120000 }));
     result.value = data;
+    await loadMyWorkspace();
   } catch (e) {
     error.value = e.response?.data?.error || e.message || String(e);
   } finally {
@@ -310,8 +408,9 @@ async function saveDataset() {
   fd.append("file", file.value);
   fd.append("name", file.value.name || "upload");
   try {
-    const { data } = await axios.post("/api/datasets", fd);
+    const { data } = await axios.post("/api/datasets", fd, authConfig());
     alert(`已保存到数据库，dataset_id=${data.id}，共 ${data.rows} 行`);
+    await loadMyWorkspace();
   } catch (e) {
     error.value = e.response?.data?.error || e.message;
   } finally {
@@ -331,12 +430,113 @@ async function analyzeSinaOnline() {
   fd.append("horizon_months", String(form.value.horizon_months));
   if (form.value.inverse_columns) fd.append("inverse_columns", form.value.inverse_columns);
   try {
-    const { data } = await axios.post("/api/analyze/sina", fd, { timeout: 120000 });
+    const { data } = await axios.post("/api/analyze/sina", fd, authConfig({ timeout: 120000 }));
     result.value = data;
+    await loadMyWorkspace();
   } catch (e) {
     error.value = e.response?.data?.error || e.message || String(e);
   } finally {
     loadingOnline.value = false;
+  }
+}
+
+async function shareCurrentRun() {
+  if (!result.value?.run_id) return;
+  try {
+    const { data } = await axios.post(
+      `/api/runs/${result.value.run_id}/share`,
+      { expires_days: 7 },
+      authConfig(),
+    );
+    shareUrl.value = data.share_url || "";
+    if (shareUrl.value && navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(shareUrl.value);
+    }
+  } catch (e) {
+    error.value = e.response?.data?.error || e.message || String(e);
+  }
+}
+
+async function exportCurrentRunPdf() {
+  if (!result.value?.run_id) return;
+  try {
+    const resp = await axios.get(`/api/runs/${result.value.run_id}/export/pdf`, {
+      ...authConfig(),
+      responseType: "blob",
+    });
+    const blob = new Blob([resp.data], { type: "application/pdf" });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `analysis_${result.value.run_id}.pdf`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+  } catch (e) {
+    error.value = e.response?.data?.error || "导出PDF失败，请稍后重试。";
+  }
+}
+
+async function loadRunFromQuery() {
+  const sharedToken = String(route.query.shared_token || "").trim();
+  if (sharedToken) {
+    try {
+      const { data } = await axios.get(`/api/share/${sharedToken}`);
+      const run = data?.run || {};
+      activeRunId.value = Number(run.id || 0) || null;
+      result.value = { ...(run.result || {}), run_id: run.id, dataset_id: run.dataset_id };
+      const p = run?.params || {};
+      form.value.forecast_model = p.forecast_model || form.value.forecast_model;
+      form.value.fusion_method = p.fusion_method || form.value.fusion_method;
+      form.value.standardize = p.standardize || form.value.standardize;
+      form.value.transform_type = p.transform_type || form.value.transform_type;
+      form.value.horizon_months = Number(p.horizon_months || form.value.horizon_months);
+      if (Array.isArray(p.inverse_columns)) form.value.inverse_columns = p.inverse_columns.join(",");
+      else if (typeof p.inverse_columns === "string") form.value.inverse_columns = p.inverse_columns;
+      else form.value.inverse_columns = "";
+      await nextTick();
+      renderAllCharts();
+      return;
+    } catch (e) {
+      error.value = e.response?.data?.error || "加载分享分析失败。";
+      return;
+    }
+  }
+
+  const rid = Number(route.query.run_id || 0);
+  if (!rid || rid <= 0) {
+    activeRunId.value = null;
+    return;
+  }
+  try {
+    const { data } = await axios.get(`/api/runs/${rid}`, authConfig());
+    activeRunId.value = rid;
+    result.value = { ...(data?.result || {}), run_id: data?.id, dataset_id: data?.dataset_id };
+    const p = data?.params || {};
+    form.value.forecast_model = p.forecast_model || form.value.forecast_model;
+    form.value.fusion_method = p.fusion_method || form.value.fusion_method;
+    form.value.standardize = p.standardize || form.value.standardize;
+    form.value.transform_type = p.transform_type || form.value.transform_type;
+    form.value.horizon_months = Number(p.horizon_months || form.value.horizon_months);
+    if (Array.isArray(p.inverse_columns)) form.value.inverse_columns = p.inverse_columns.join(",");
+    else if (typeof p.inverse_columns === "string") form.value.inverse_columns = p.inverse_columns;
+    else form.value.inverse_columns = "";
+    await nextTick();
+    renderAllCharts();
+  } catch (e) {
+    error.value = e.response?.data?.error || "加载历史分析失败。";
+  }
+}
+
+async function compareRuns() {
+  if (!compareForm.value.runA || !compareForm.value.runB) return;
+  try {
+    const { data } = await axios.get(
+      `/api/runs/compare?run_id_a=${compareForm.value.runA}&run_id_b=${compareForm.value.runB}`,
+      authConfig(),
+    );
+    compareResult.value = data;
+  } catch (e) {
+    error.value = e.response?.data?.error || e.message || String(e);
   }
 }
 
@@ -346,6 +546,7 @@ function renderChart() {
   const fc = result.value.forecast || [];
   const histData = hist.map((x) => [x.date, x.composite]);
   const fcData = fc.map((x) => [x.date, x.forecast_composite]);
+  const bands = _buildConfidenceBand(hist, fc);
 
   chart?.dispose();
   chart = echarts.init(chartEl.value, null, { renderer: "canvas" });
@@ -360,7 +561,7 @@ function renderChart() {
       textStyle: { color: "#f1f5f9" },
     },
     legend: {
-      data: ["历史综合指数", "预测"],
+      data: ["历史综合指数", "预测", ...(showConfidenceBand.value ? ["预测下界", "预测上界"] : [])],
       top: 0,
       textStyle: { color: "#64748b" },
     },
@@ -408,51 +609,153 @@ function renderChart() {
         showSymbol: true,
         symbolSize: 6,
       },
+      ...(showConfidenceBand.value && bands.lower.length
+        ? [
+            {
+              name: "预测下界",
+              type: "line",
+              data: bands.lower,
+              lineStyle: { width: 1, opacity: 0.75, type: "dotted" },
+              showSymbol: false,
+            },
+            {
+              name: "预测上界",
+              type: "line",
+              data: bands.upper,
+              lineStyle: { width: 1, opacity: 0.75, type: "dotted" },
+              areaStyle: { color: "rgba(245, 158, 11, 0.12)" },
+              showSymbol: false,
+            },
+          ]
+        : []),
     ],
   });
 }
 
-function renderWeightChart() {
-  if (!weightChartEl.value || !result.value) return;
-  const rows = weightRows.value;
-  if (!rows.length) return;
-  weightChart?.dispose();
-  weightChart = echarts.init(weightChartEl.value, null, { renderer: "canvas" });
-  weightChart.setOption({
-    grid: { left: 56, right: 20, top: 24, bottom: 48 },
-    tooltip: { trigger: "axis" },
+function _buildConfidenceBand(hist, fc) {
+  if (!hist.length || !fc.length) return { lower: [], upper: [] };
+  const y = hist.map((x) => Number(x.composite)).filter((v) => Number.isFinite(v));
+  if (y.length < 8) return { lower: [], upper: [] };
+  const diffs = [];
+  for (let i = 1; i < y.length; i += 1) diffs.push(y[i] - y[i - 1]);
+  const mean = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+  const variance = diffs.reduce((acc, d) => acc + (d - mean) ** 2, 0) / Math.max(1, diffs.length - 1);
+  const sigma = Math.sqrt(Math.max(variance, 1e-8));
+  const z = 1.96; // ~95% CI
+
+  const lower = [];
+  const upper = [];
+  fc.forEach((row, idx) => {
+    const step = idx + 1;
+    const base = Number(row.forecast_composite);
+    const margin = z * sigma * Math.sqrt(step);
+    lower.push([row.date, base - margin]);
+    upper.push([row.date, base + margin]);
+  });
+  return { lower, upper };
+}
+
+function renderPhaseChart() {
+  if (!compareChartEl.value || !result.value) return;
+  const cols = result.value.indicator_columns || [];
+  const corrRows = result.value.indicator_corr || [];
+  if (!cols.length || !corrRows.length) {
+    compareChart?.dispose();
+    compareChart = echarts.init(compareChartEl.value, null, { renderer: "canvas" });
+    compareChart.setOption({
+      xAxis: { show: false, min: 0, max: 1 },
+      yAxis: { show: false, min: 0, max: 1 },
+      series: [],
+      graphic: [
+        {
+          type: "text",
+          left: "center",
+          top: "middle",
+          style: {
+            text: "当前结果缺少相关性数据（请重新运行分析）",
+            fill: "#94a3b8",
+            fontSize: 13,
+          },
+        },
+      ],
+    });
+    return;
+  }
+  const pos = new Map(cols.map((k, i) => [k, i]));
+  const heatData = corrRows
+    .map((r) => {
+      const x = pos.get(r.col);
+      const y = pos.get(r.row);
+      const v = Number(r.value);
+      if (x === undefined || y === undefined || !Number.isFinite(v)) return null;
+      // Use one-sided correlation scale [0, 1] for display.
+      return [x, y, Number(Math.max(0, Math.min(1, Math.abs(v))).toFixed(4))];
+    })
+    .filter(Boolean);
+  if (!heatData.length) return;
+  const labels = cols.map((c) => labelZh(c));
+
+  compareChart?.dispose();
+  compareChart = echarts.init(compareChartEl.value, null, { renderer: "canvas" });
+  compareChart.setOption({
+    grid: { left: 120, right: 24, top: 28, bottom: 88 },
+    tooltip: {
+      position: "top",
+      formatter: (params) => {
+        const [x, y, v] = params.data || [];
+        const a = labels[x] || "";
+        const b = labels[y] || "";
+        return `${a} × ${b}<br/>相关系数：${Number(v).toFixed(4)}`;
+      },
+    },
     xAxis: {
       type: "category",
-      data: rows.map((r) => r.name),
-      axisLabel: { color: "#64748b", interval: 0, rotate: 20 },
+      data: labels,
       axisLine: { lineStyle: { color: "#cbd5e1" } },
+      axisLabel: { color: "#64748b", interval: 0, rotate: 24 },
+      splitArea: { show: true },
     },
     yAxis: {
-      type: "value",
-      axisLabel: { color: "#64748b" },
-      splitLine: { lineStyle: { color: "#e2e8f0", type: "dashed" } },
+      type: "category",
+      data: labels,
+      axisLine: { lineStyle: { color: "#cbd5e1" } },
+      axisLabel: { color: "#64748b", interval: 0 },
+      splitArea: { show: true },
+    },
+    visualMap: {
+      min: 0,
+      max: 1,
+      calculable: true,
+      orient: "horizontal",
+      left: "center",
+      bottom: 18,
+      text: ["高相关", "低相关"],
+      textStyle: { color: "#64748b" },
+      inRange: {
+        // Match reference palette: low=blue, high=red.
+        color: ["#2f66ad", "#6d96cb", "#edf2f7", "#e3caca", "#bf6f6f", "#8f2d35"],
+      },
     },
     series: [
       {
-        type: "bar",
-        data: rows.map((r) => Number(r.value.toFixed(6))),
-        barMaxWidth: 42,
-        itemStyle: {
-          borderRadius: [8, 8, 0, 0],
-          color: {
-            type: "linear",
-            x: 0,
-            y: 0,
-            x2: 0,
-            y2: 1,
-            colorStops: [
-              { offset: 0, color: "#C3E5AE" },
-              { offset: 1, color: "#97DBAE" },
-            ],
+        name: "相关性",
+        type: "heatmap",
+        data: heatData,
+        label: {
+          show: true,
+          color: "#334155",
+          formatter: (p) => Number(p.data?.[2] ?? 0).toFixed(2),
+        },
+        emphasis: {
+          itemStyle: {
+            shadowBlur: 8,
+            shadowColor: "rgba(15,23,42,0.25)",
           },
         },
       },
     ],
+    animationDuration: 450,
+    animationEasing: "cubicOut",
   });
 }
 
@@ -499,13 +802,13 @@ function renderStateChart() {
 
 function renderAllCharts() {
   renderChart();
-  renderWeightChart();
+  renderPhaseChart();
   renderStateChart();
 }
 
 function handleResize() {
   chart?.resize();
-  weightChart?.resize();
+  compareChart?.resize();
   stateChart?.resize();
 }
 
@@ -513,8 +816,8 @@ watch(result, async (val) => {
   if (!val) {
     chart?.dispose();
     chart = null;
-    weightChart?.dispose();
-    weightChart = null;
+    compareChart?.dispose();
+    compareChart = null;
     stateChart?.dispose();
     stateChart = null;
     return;
@@ -523,16 +826,31 @@ watch(result, async (val) => {
   renderAllCharts();
 });
 
+watch(showConfidenceBand, async () => {
+  if (!result.value) return;
+  await nextTick();
+  renderChart();
+});
+
 onMounted(() => {
   window.addEventListener("resize", handleResize);
+  loadMyWorkspace();
+  loadRunFromQuery();
 });
 
 onUnmounted(() => {
   chart?.dispose();
-  weightChart?.dispose();
+  compareChart?.dispose();
   stateChart?.dispose();
   window.removeEventListener("resize", handleResize);
 });
+
+watch(
+  () => route.query.run_id,
+  () => {
+    loadRunFromQuery();
+  },
+);
 </script>
 
 <style scoped>
@@ -894,6 +1212,15 @@ onUnmounted(() => {
 
 .chart-small {
   height: 320px;
+}
+
+.switch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 0 0.6rem;
+  font-size: 0.84rem;
+  color: #475569;
 }
 
 .table-wrap {
